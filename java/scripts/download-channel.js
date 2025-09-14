@@ -466,7 +466,7 @@ class DownloadChannel {
           // Enhanced file size verification
           const expectedSize = message.media?.document?.size || message.media?.photo?.sizes?.[0]?.size || 0;
           const sizeVerified = expectedSize === 0 || fileSize >= expectedSize * 0.95; // Allow 5% tolerance
-          
+
           if (!sizeVerified && expectedSize > 0) {
             logger.warn(
               `⚠️ Size mismatch: ${path.basename(mediaPath)} - Expected: ${(expectedSize / 1024 / 1024).toFixed(2)}MB, Got: ${(fileSize / 1024 / 1024).toFixed(2)}MB`
@@ -779,350 +779,15 @@ class DownloadChannel {
       .sort((a, b) => a.message.id - b.message.id);
 
     const failedDownloads = downloadedData.filter((data) => data.failed).length;
+    const successfulDownloads = downloadedData.length - failedDownloads;
+
     if (failedDownloads > 0) {
-      logger.warn(`⚠️ ${failedDownloads} downloads had issues but proceeding`);
-    }
+      logger.warn(`⚠️ ${failedDownloads} downloads had issues but proceeding (${successfulDownloads} successful)`);
 
-    logger.info(
-      `✅ Ultra-speed downloads complete! ${downloadedData.length} messages ready (Avg: ${this.speedMonitor ? this.speedMonitor.getAverageSpeedMbps() + " Mbps, Peak: " + this.speedMonitor.getPeakSpeedMbps() + " Mbps" : "High Speed"})`,
-    );
-    return downloadedData;
-  }
-
-  /**
-   * SEQUENTIAL UPLOAD QUEUE - Maintains strict message order
-   * Files wait at 99% until previous files complete upload
-   */
-  async uploadBatch(client, downloadedData) {
-    if (!this.uploadMode || !downloadedData.length) {
-      return downloadedData;
-    }
-
-    const isSingleFile = downloadedData.length === 1;
-    const optimizationMode = isSingleFile
-      ? "SINGLE-FILE BOOST"
-      : "SEQUENTIAL QUEUE";
-
-    // Sort by message ID to ensure proper order (a, b, c...)
-    downloadedData.sort((a, b) => a.message.id - b.message.id);
-    logger.info(
-      `📤 ${optimizationMode} upload: ${downloadedData.length} messages - STRICT ORDER MAINTAINED`,
-    );
-
-    // Initialize sequential upload state
-    const uploadQueue = downloadedData.map((data, index) => ({
-      ...data,
-      queueIndex: index,
-      uploadStarted: false,
-      uploadCompleted: false,
-      readyToUpload: index === 0, // First message can start immediately
-      waitingForPrevious: index > 0,
-    }));
-
-    let completedUploads = 0;
-    const uploadResults = [];
-
-    // Process uploads in strict sequential order
-    for (
-      let currentIndex = 0;
-      currentIndex < uploadQueue.length;
-      currentIndex++
-    ) {
-      const currentData = uploadQueue[currentIndex];
-      const messageId = currentData.message.id;
-      const fileName = currentData.mediaPath
-        ? path.basename(currentData.mediaPath)
-        : `Message_${messageId}`;
-
-      try {
-        // Optimized: Allow up to 2 concurrent uploads instead of strict sequential
-        if (currentIndex > 1) { // Change from 0 to 1 to allow 2 concurrent uploads
-          const previousData = uploadQueue[currentIndex - 1];
-          if (!previousData.uploadCompleted) {
-            logger.info(
-              `⏳ File '${fileName}' waiting at 99% for previous message ${previousData.message.id} to complete...`,
-            );
-
-            // Keep showing "waiting" status until previous completes (throttled for performance)
-            let waitCounter = 0;
-            while (!previousData.uploadCompleted && waitCounter < 300) {
-              // Max 5 minutes wait
-              // Throttle console output (only every 10 seconds)
-              if (waitCounter % 10 === 0) {
-                process.stdout.write(
-                  `\r⏳ [${currentIndex + 1}/${uploadQueue.length}] '${fileName}' waiting at 99% for message ${previousData.message.id}... (${waitCounter}s)`,
-                );
-              }
-              await this.precisionDelay(1000);
-              waitCounter++;
-            }
-
-            if (!previousData.uploadCompleted) {
-              throw new Error(
-                `Timeout waiting for previous message ${previousData.message.id}`,
-              );
-            }
-
-            process.stdout.write(
-              `\n✅ Previous message completed! '${fileName}' can now upload...\n`,
-            );
-          }
-        }
-
-        // Verify file exists
-        if (currentData.mediaPath && !fs.existsSync(currentData.mediaPath)) {
-          logger.warn(
-            `⚠️ Missing file for message ${messageId}: ${currentData.mediaPath}`,
-          );
-          currentData.mediaPath = null;
-        }
-
-        // Mark as started
-        currentData.uploadStarted = true;
-        logger.info(
-          `🚀 [${currentIndex + 1}/${uploadQueue.length}] Sequential upload starting: '${fileName}' (Message ${messageId})`,
-        );
-
-        // Perform upload with retry mechanism
-        await this.retryOperation(async () => {
-          try {
-            if (currentData.mediaPath) {
-              await this.uploadMessage(
-                client,
-                currentData.message,
-                currentData.mediaPath,
-                isSingleFile,
-              );
-            } else {
-              await this.uploadMessage(
-                client,
-                currentData.message,
-                null,
-                isSingleFile,
-              );
-            }
-          } catch (error) {
-            if (
-              error.message.includes("Not connected") ||
-              error.message.includes("Connection closed")
-            ) {
-              logger.warn(`🔄 Connection issue detected, reconnecting...`);
-              await this.reconnectClient(client);
-              throw error;
-            }
-            throw error;
-          }
-        }, `uploading message ${messageId} (${fileName})`);
-
-        // Mark as completed
-        currentData.uploadCompleted = true;
-        completedUploads++;
-
-        logger.info(
-          `✅ [${currentIndex + 1}/${uploadQueue.length}] Sequential upload complete: '${fileName}' (Message ${messageId}) - ${this.speedMonitor ? this.speedMonitor.getCurrentSpeedMbps() + " Mbps" : "OK"}`,
-        );
-
-        // Signal next message that it can start
-        if (currentIndex + 1 < uploadQueue.length) {
-          uploadQueue[currentIndex + 1].readyToUpload = true;
-          uploadQueue[currentIndex + 1].waitingForPrevious = false;
-          logger.info(
-            `🎯 Next file '${uploadQueue[currentIndex + 1].mediaPath ? path.basename(uploadQueue[currentIndex + 1].mediaPath) : `Message_${uploadQueue[currentIndex + 1].message.id}`}' is now ready to upload`,
-          );
-        }
-
-        uploadResults.push({ success: true, data: currentData });
-      } catch (error) {
-        logger.error(
-          `❌ Sequential upload error for '${fileName}' (Message ${messageId}): ${error.message}`,
-        );
-
-        if (error.message.includes("FLOOD_WAIT")) {
-          const waitTime = parseInt(error.message.match(/\d+/)?.[0] || "60");
-          logger.warn(
-            `⏳ Flood wait for ${waitTime}s during sequential upload...`,
-          );
-          await this.precisionDelay(waitTime * 1000);
-
-          try {
-            // Retry upload after flood wait
-            const retrySuccess = await this.uploadMessage(
-              client,
-              currentData.message,
-              currentData.mediaPath,
-              isSingleFile,
-            );
-            if (retrySuccess) {
-              currentData.uploadCompleted = true;
-              completedUploads++;
-              uploadResults.push({ success: true, data: currentData });
-              continue;
-            }
-          } catch (retryError) {
-            logger.error(
-              `❌ Sequential upload retry failed: ${retryError.message}`,
-            );
-          }
-        }
-
-        // Mark as failed but continue sequence
-        currentData.uploadCompleted = true; // Allow next file to proceed
-        uploadResults.push({ success: false, data: currentData });
-
-        // Signal next message can proceed despite this failure
-        if (currentIndex + 1 < uploadQueue.length) {
-          uploadQueue[currentIndex + 1].readyToUpload = true;
-          uploadQueue[currentIndex + 1].waitingForPrevious = false;
-        }
-      }
-
-      // Small delay between sequential uploads for stability
-      if (currentIndex + 1 < uploadQueue.length) {
-        await this.precisionDelay(isSingleFile ? 100 : 500);
-      }
-    }
-
-    logger.info(
-      `✅ Sequential upload queue complete! ${completedUploads}/${uploadQueue.length} messages uploaded in perfect order (Avg: ${this.speedMonitor ? this.speedMonitor.getAverageSpeedMbps() + " Mbps, Peak: " + this.speedMonitor.getPeakSpeedMbps() + " Mbps" : "High Speed"})`,
-    );
-
-    return downloadedData;
-  }
-
-  /**
-   * ULTRA-HIGH-SPEED batch download with dynamic optimization
-   */
-  async downloadBatch(client, messages, channelId) {
-    const isSingleFile = messages.length === 1;
-    const isSmallBatch = messages.length <= 3; // Small batch optimization
-    const isLastBatch = this.totalProcessedMessages + messages.length >= this.totalMessages * 0.95; // Last 5% of files
-
-    // Determine optimization mode
-    let optimizationMode;
-    if (isSingleFile) {
-      optimizationMode = "SINGLE-FILE TURBO";
-    } else if (isSmallBatch || isLastBatch) {
-      optimizationMode = "SMALL-BATCH TURBO";
-    } else {
-      optimizationMode = "BATCH PARALLEL";
-    }
-
-    // Enhanced speed target for small files and final files
-    const speedTarget = (isSingleFile || isSmallBatch || isLastBatch) ? "40+ Mbps" : "30+ Mbps";
-
-    logger.info(
-      `📥 ${optimizationMode} download: ${messages.length} messages (${MAX_PARALLEL_DOWNLOADS_CONFIG} workers, ${CHUNK_SIZE_CONFIG / 1024 / 1024}MB chunks) - Target: ${speedTarget}`,
-    );
-
-    messages.sort((a, b) => a.id - b.id);
-
-    // Minimal or no wait for single files, small batches, or last batch
-    if (isSingleFile || isSmallBatch || isLastBatch) {
-      await this.ultraOptimizedWait(5); // Ultra-minimal delay
-    } else {
-      await this.ultraOptimizedWait(15);
-    }
-
-    const downloadPromises = messages.map(async (message, index) => {
-      let retryCount = 0;
-      const maxBatchRetries = 3;
-
-      while (retryCount < maxBatchRetries) {
-        try {
-          logger.info(
-            `🚀 Ultra-parallel download ${index + 1}/${messages.length}: Message ${message.id}`,
-          );
-
-          await this.checkRateLimit();
-
-          let mediaPath = null;
-          let hasContent = false;
-
-          if (message.message && message.message.trim()) {
-            hasContent = true;
-            logger.info(`📝 Text: "${message.message.substring(0, 30)}..."`);
-          }
-
-          if (message.media || message.sticker) {
-            hasContent = true;
-            // Set current file size for speed optimization
-            const estimatedSize = message.media?.document?.size ||
-                                 message.media?.photo?.sizes?.[0]?.size ||
-                                 0;
-
-            if (this.speedMonitor) {
-              this.speedMonitor.setCurrentFileSize(estimatedSize);
-            }
-
-            mediaPath = await this.downloadMessage(
-              client,
-              message,
-              channelId,
-              isSingleFile || isSmallBatch || isLastBatch, // Treat small batches and last batch like single files
-            );
-
-            if (mediaPath && !fs.existsSync(mediaPath)) {
-              logger.warn(`❌ File verification failed: ${mediaPath}`);
-              mediaPath = null;
-              throw new Error(`File not found: ${mediaPath}`);
-            }
-          }
-
-          if (hasContent) {
-            this.totalProcessedMessages++;
-            logger.info(
-              `✅ Download complete ${index + 1}/${messages.length}: Message ${message.id} (${this.speedMonitor ? this.speedMonitor.getCurrentSpeedMbps() + " Mbps" : "OK"})`,
-            );
-            return {
-              message: message,
-              mediaPath: mediaPath,
-              hasContent: hasContent,
-              downloadIndex: index,
-            };
-          }
-          break;
-        } catch (error) {
-          retryCount++;
-          logger.error(
-            `❌ Batch retry ${retryCount}/${maxBatchRetries} for message ${message.id}: ${error.message}`,
-          );
-
-          if (error.message.includes("FLOOD_WAIT")) {
-            const waitTime = parseInt(error.message.match(/\d+/)?.[0] || "60");
-            this.updateFloodWaitHistory(true, waitTime);
-            await this.precisionDelay(waitTime * 1000);
-          }
-
-          if (retryCount < maxBatchRetries) {
-            await this.precisionDelay(1000 * retryCount);
-          } else {
-            return {
-              message: message,
-              mediaPath: null,
-              hasContent: Boolean(
-                message.message || message.media || message.sticker,
-              ),
-              downloadIndex: index,
-              failed: true,
-            };
-          }
-        }
-      }
-      return null;
-    });
-
-    logger.info(
-      `⏳ Processing ${messages.length} downloads with ${MAX_PARALLEL_DOWNLOADS_CONFIG} workers each...`,
-    );
-    const results = await Promise.all(downloadPromises);
-
-    const downloadedData = results
-      .filter((result) => result !== null)
-      .sort((a, b) => a.message.id - b.message.id);
-
-    const failedDownloads = downloadedData.filter((data) => data.failed).length;
-    if (failedDownloads > 0) {
-      logger.warn(`⚠️ ${failedDownloads} downloads had issues but proceeding`);
+      // Log details about failed downloads
+      downloadedData.filter(data => data.failed).forEach(data => {
+        logger.warn(`⚠️ Failed download: Message ${data.message.id} - ${data.message.media ? 'has media' : 'no media'}`);
+      });
     }
 
     logger.info(
@@ -1719,7 +1384,7 @@ class DownloadChannel {
       await this.ultraOptimizedWait(100);
 
       client = await initAuth();
-      
+
       // Enable continuous mode - keep running until user chooses to exit
       await this.continuousMode(client, options);
     } catch (err) {
@@ -1744,7 +1409,7 @@ class DownloadChannel {
   async continuousMode(client, initialOptions = {}) {
     logger.info("🔄 CONTINUOUS MODE: Multiple channel downloads without re-login");
     logger.info("📋 You can download/upload multiple channels in one session");
-    
+
     while (true) {
       try {
         // Reset instance variables for new channel
@@ -1796,20 +1461,20 @@ class DownloadChannel {
 
         // Clear initial options so user can select new channel
         initialOptions = {};
-        
+
         logger.info("🔄 Starting new channel selection...");
         await this.ultraOptimizedWait(1000);
-        
+
       } catch (err) {
         logger.error("Error in continuous mode:");
         console.error(err);
-        
+
         const retryAfterError = await this.askRetryAfterError();
         if (!retryAfterError) {
           logger.info("🛑 Exiting due to error...");
           break;
         }
-        
+
         await this.ultraOptimizedWait(2000);
       }
     }
