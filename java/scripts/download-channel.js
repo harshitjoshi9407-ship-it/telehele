@@ -35,7 +35,7 @@ const MESSAGE_LIMIT_CONFIG = 1000; // Increased batch size for better efficiency
 const RATE_LIMIT_DELAY_CONFIG = 200; // Ultra-minimal delay for maximum speed
 const DOWNLOAD_DELAY_CONFIG = 150; // Ultra-minimal delay for maximum throughput
 const UPLOAD_DELAY_CONFIG = 150; // Ultra-minimal delay for maximum throughput
-const CHUNK_SIZE_CONFIG = 32 * 1024 * 1024; // Increased to 32MB for maximum throughput
+const CHUNK_SIZE_CONFIG = 4 * 1024 * 1024; // Increased to 32MB for maximum throughput
 
 // ULTRA-HIGH-SPEED CONFIGURATIONS
 const BATCH_SIZE = 2; // Increased batch size for better parallel processing
