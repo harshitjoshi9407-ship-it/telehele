@@ -29,18 +29,18 @@ const {
 } = require("../utils/input-helper");
 
 // ULTRA-OPTIMIZED CONFIGURATIONS FOR CONSISTENT 30+ MBPS
-const MAX_PARALLEL_DOWNLOADS_CONFIG = 32 ; // Dramatically increased for maximum throughput
-const MAX_PARALLEL_UPLOADS_CONFIG = 32; // Dramatically increased for maximum throughput
-const MESSAGE_LIMIT_CONFIG = 3000; // Increased batch size for better efficiency
-const RATE_LIMIT_DELAY_CONFIG = 50; // Ultra-minimal delay for maximum speed
-const DOWNLOAD_DELAY_CONFIG = 20; // Ultra-minimal delay for maximum throughput
-const UPLOAD_DELAY_CONFIG = 20; // Ultra-minimal delay for maximum throughput
-const CHUNK_SIZE_CONFIG = 32* 1024 * 1024; // Increased to 32MB for maximum throughput
+const MAX_PARALLEL_DOWNLOADS_CONFIG = 4; // Dramatically increased for maximum throughput
+const MAX_PARALLEL_UPLOADS_CONFIG = 4; // Dramatically increased for maximum throughput
+const MESSAGE_LIMIT_CONFIG = 1000; // Increased batch size for better efficiency
+const RATE_LIMIT_DELAY_CONFIG = 200; // Ultra-minimal delay for maximum speed
+const DOWNLOAD_DELAY_CONFIG = 150; // Ultra-minimal delay for maximum throughput
+const UPLOAD_DELAY_CONFIG = 150; // Ultra-minimal delay for maximum throughput
+const CHUNK_SIZE_CONFIG = 32 * 1024 * 1024; // Increased to 32MB for maximum throughput
 
 // ULTRA-HIGH-SPEED CONFIGURATIONS
 const BATCH_SIZE = 2; // Increased batch size for better parallel processing
 const CONNECTION_POOL_SIZE = 8; // More connection pools for stability
-const SPEED_STABILIZATION_DELAY = 25; // Ultra-minimal stabilization delay
+const SPEED_STABILIZATION_DELAY = 50; // Ultra-minimal stabilization delay
 const THROUGHPUT_OPTIMIZATION_MODE = true;
 const AGGRESSIVE_SPEED_MODE = true; // Enabled for maximum speed
 const TARGET_SPEED_MBPS = 100; // Increased target to 35 Mbps for headroom
@@ -223,7 +223,7 @@ class DownloadChannel {
     );
 
     // Log patterns for debugging
-    if (this.consecutiveFileRefErrors > 0 && this.consecutiveFileRefErrors % 5 === 0) {
+    if (this.consecutiveFileRefErrors > 0 && this.consecutiveFileRefErrors % 3 === 0) {
       const recentErrors = this.fileReferenceErrors.filter(
         (timestamp) => now - timestamp < 5 * 60 * 1000
       ).length;
@@ -241,6 +241,76 @@ class DownloadChannel {
     if (this.consecutiveFileRefErrors > 0) {
       logger.info(`📋 File reference errors cleared after ${this.consecutiveFileRefErrors} consecutive attempts`);
       this.consecutiveFileRefErrors = 0;
+    }
+  }
+
+  /**
+   * Delete existing file to force fresh download
+   */
+  deleteExistingFile(filePath) {
+    try {
+      if (fs.existsSync(filePath)) {
+        fs.unlinkSync(filePath);
+        logger.info(`🗑️ Deleted existing file for fresh download: ${path.basename(filePath)}`);
+        return true;
+      }
+      return false;
+    } catch (error) {
+      logger.warn(`⚠️ Failed to delete existing file ${filePath}: ${error.message}`);
+      return false;
+    }
+  }
+
+  /**
+   * Multi-strategy message refresh system
+   * Strategy 1: Single message refresh
+   * Strategy 2: Batch refresh with surrounding messages  
+   * Strategy 3: Full channel refresh
+   */
+  async refreshMessageWithStrategies(client, channelId, message, attempt = 1) {
+    const maxStrategies = 3;
+    
+    try {
+      if (attempt <= 3) {
+        // Strategy 1: Single message refresh
+        logger.info(`🔄 Strategy 1: Refreshing single message ${message.id} (attempt ${attempt})`);
+        const refreshedMessages = await getMessageDetail(client, channelId, [message.id]);
+        if (refreshedMessages && refreshedMessages.length > 0) {
+          logger.success(`✅ Strategy 1 success: Message ${message.id} refreshed`);
+          return refreshedMessages[0];
+        }
+      } else if (attempt <= 6) {
+        // Strategy 2: Batch refresh with surrounding messages
+        const surroundingIds = [];
+        for (let i = Math.max(1, message.id - 2); i <= message.id + 2; i++) {
+          surroundingIds.push(i);
+        }
+        logger.info(`🔄 Strategy 2: Refreshing batch around message ${message.id} (attempt ${attempt})`);
+        const refreshedMessages = await getMessageDetail(client, channelId, surroundingIds);
+        if (refreshedMessages && refreshedMessages.length > 0) {
+          const targetMessage = refreshedMessages.find(msg => msg.id === message.id);
+          if (targetMessage) {
+            logger.success(`✅ Strategy 2 success: Message ${message.id} refreshed in batch`);
+            return targetMessage;
+          }
+        }
+      } else {
+        // Strategy 3: Full channel refresh
+        logger.info(`🔄 Strategy 3: Full channel refresh for message ${message.id} (attempt ${attempt})`);
+        const allRefreshed = await this.refreshAllChannelMessages(client, channelId);
+        if (allRefreshed && allRefreshed.length > 0) {
+          const targetMessage = allRefreshed.find(msg => msg.id === message.id);
+          if (targetMessage) {
+            logger.success(`✅ Strategy 3 success: Message ${message.id} refreshed in full channel`);
+            return targetMessage;
+          }
+        }
+      }
+      
+      return null;
+    } catch (error) {
+      logger.error(`❌ Strategy ${Math.min(3, Math.ceil(attempt/2))} failed for message ${message.id}: ${error.message}`);
+      return null;
     }
   }
 
@@ -510,11 +580,12 @@ class DownloadChannel {
   }
 
   /**
-   * ULTRA-OPTIMIZED download with dynamic single-file acceleration
+   * ULTRA-OPTIMIZED download with automatic file deletion and multi-strategy refresh
    */
   async downloadMessage(client, message, channelId, isSingleFile = false) {
-    const maxRetries = isSingleFile ? 5 : 10; // Fewer retries for single files
+    const maxRetries = isSingleFile ? 8 : 15; // Increased retries
     let attempt = 0;
+    let originalMessage = { ...message }; // Keep original for reference
 
     while (attempt < maxRetries) {
       try {
@@ -523,9 +594,20 @@ class DownloadChannel {
         const mediaPath = getMediaPath(message, this.outputFolder);
         const fileExists = checkFileExist(message, this.outputFolder);
 
+        // NEW: Auto-delete existing files to force fresh download
         if (fileExists) {
-          logger.info(`⏭️ File exists: ${path.basename(mediaPath)}`);
-          return mediaPath;
+          logger.warn(`🔄 File exists, deleting for fresh download: ${path.basename(mediaPath)}`);
+          const deleted = this.deleteExistingFile(mediaPath);
+          if (deleted) {
+            logger.info(`🔄 Refreshing message ${message.id} after file deletion...`);
+            
+            // Refresh message after deleting file
+            const refreshedMessage = await this.refreshMessageWithStrategies(client, channelId, message, 1);
+            if (refreshedMessage) {
+              message = refreshedMessage;
+              logger.success(`✅ Message ${message.id} refreshed after file deletion`);
+            }
+          }
         }
 
         const dir = path.dirname(mediaPath);
@@ -579,7 +661,9 @@ class DownloadChannel {
             logger.warn(
               `⚠️ Size mismatch: ${path.basename(mediaPath)} - Expected: ${(expectedSize / 1024 / 1024).toFixed(2)}MB, Got: ${(fileSize / 1024 / 1024).toFixed(2)}MB`,
             );
-            // Retry download for incomplete files
+            
+            // Delete incomplete file and retry
+            this.deleteExistingFile(mediaPath);
             throw new Error(`Incomplete download: ${path.basename(mediaPath)}`);
           }
 
@@ -587,6 +671,7 @@ class DownloadChannel {
             this.speedMonitor.updateSpeed(fileSize);
           }
           this.totalDownloaded++;
+          this.resetFileReferenceTracking(); // Reset error tracking on success
 
           logger.info(
             `✅ Downloaded: ${path.basename(mediaPath)} (${speedMbps.toFixed(1)} Mbps)${sizeVerified ? " ✓ Size verified" : ""}${isSingleFile ? " [SINGLE-FILE BOOST]" : ""}`,
@@ -602,62 +687,58 @@ class DownloadChannel {
         );
 
         if (error.message.includes("FILE_REFERENCE_EXPIRED")) {
-          // New: Dedicated retry logic for FILE_REFERENCE_EXPIRED
-          const maxFileReferenceRetries = 3; // Define here to keep changes localized
-          for (
-            let refAttempt = 1;
-            refAttempt <= maxFileReferenceRetries;
-            refAttempt++
-          ) {
-            logger.warn(
-              `🔄 Attempting to refresh message ${message.id} (File Reference Expired, retry ${refAttempt}/${maxFileReferenceRetries})...`,
+          this.trackFileReferenceError();
+          logger.error(`📋 File reference expired for a message, script will retry automatically`);
+          
+          // Enhanced multi-strategy refresh for FILE_REFERENCE_EXPIRED
+          let refreshSuccess = false;
+          for (let strategyAttempt = 1; strategyAttempt <= 8; strategyAttempt++) {
+            logger.info(`🔄 FILE_REFERENCE strategy attempt ${strategyAttempt}/8 for message ${message.id}`);
+            
+            const refreshedMessage = await this.refreshMessageWithStrategies(
+              client, 
+              channelId, 
+              originalMessage, 
+              strategyAttempt
             );
-            try {
-              const refreshedMessages = await getMessageDetail(
-                client,
-                channelId,
-                [message.id],
-              );
-              if (refreshedMessages && refreshedMessages.length > 0) {
-                message = refreshedMessages[0]; // Update the message object with refreshed details
-                logger.info(`✅ Message ${message.id} refreshed successfully.`);
-                // Immediately retry the download with the refreshed message
-                // Reset attempt counter for the main loop to give it full retries
-                attempt = 0;
-                break; // Break from file reference retry loop to re-enter main download logic
-              } else {
-                logger.warn(
-                  `⚠️ Message ${message.id} refresh returned no data.`,
-                );
-              }
-            } catch (refreshError) {
-              logger.error(
-                `❌ Message refresh failed on attempt ${refAttempt}: ${refreshError.message}`,
-              );
+            
+            if (refreshedMessage) {
+              message = refreshedMessage;
+              logger.success(`✅ FILE_REFERENCE resolved using strategy ${Math.min(3, Math.ceil(strategyAttempt/2))}`);
+              refreshSuccess = true;
+              attempt = Math.max(0, attempt - 3); // Give extra attempts after successful refresh
+              break;
             }
-            // Add a small delay before retrying refresh
-            await this.precisionDelay(500 * refAttempt);
+            
+            // Progressive delay between strategy attempts
+            const strategyDelay = Math.min(5000, 1000 * strategyAttempt);
+            await this.precisionDelay(strategyDelay);
           }
-          // If after maxFileReferenceRetries, we still couldn't refresh, then proceed to main loop's next attempt or failure
-          if (attempt === 0) {
-            // If message was successfully refreshed, restart main loop
-            continue;
+          
+          if (!refreshSuccess) {
+            logger.error(`❌ All FILE_REFERENCE strategies failed for message ${message.id}`);
+            if (attempt >= maxRetries) {
+              throw new Error(`FILE_REFERENCE_EXPIRED: All refresh strategies failed`);
+            }
           }
+          
+          // Continue main loop after refresh attempt
+          continue;
         }
 
         if (attempt === maxRetries) {
           throw error; // Re-throw if all retries exhausted
         }
 
-        // Minimal delay for single files
+        // Progressive delay with longer waits for persistent errors
         const delay = isSingleFile
-          ? Math.min(1000, 200 * attempt)
-          : Math.min(2000, 300 * attempt);
+          ? Math.min(2000, 300 * attempt)
+          : Math.min(5000, 500 * attempt);
         await this.precisionDelay(delay);
-        continue; // Continue to the next attempt in the main while loop
+        continue;
       }
     }
-    return null; // Should ideally not be reached if error is thrown
+    return null;
   }
 
   /**
@@ -1353,7 +1434,7 @@ class DownloadChannel {
   }
 
   /**
-   * ULTRA-OPTIMIZED batch processing with advanced speed monitoring
+   * ULTRA-OPTIMIZED batch processing with proactive refresh every batch
    */
   async processBatch(client, messages, batchIndex, totalBatches, channelId) {
     try {
@@ -1362,29 +1443,51 @@ class DownloadChannel {
         `🔄 ULTRA-SPEED batch ${batchIndex + 1}/${totalBatches} (${messages.length} messages) - Speed: ${this.speedMonitor ? this.speedMonitor.getCurrentSpeedMbps() + " Mbps (" + this.speedMonitor.getSpeedStatus() + ")" : "Optimizing..."}`,
       );
 
-      // Task 1: Refresh ALL channel messages every 3 batches to prevent false "file exists" detection.
-      if (this.batchCounter % 1 === 0) {
+      // Enhanced: Refresh messages EVERY batch to prevent FILE_REFERENCE_EXPIRED errors
+      logger.info(
+        `🔄 Batch ${this.batchCounter}: Proactively refreshing messages to prevent file reference errors...`,
+      );
+      
+      // Refresh current batch messages specifically
+      const currentMessageIds = messages.map((m) => m.id);
+      try {
+        const refreshedMessages = await getMessageDetail(client, channelId, currentMessageIds);
+        
+        if (refreshedMessages && refreshedMessages.length > 0) {
+          // Update messages with refreshed data
+          const messageMap = new Map(refreshedMessages.map(msg => [msg.id, msg]));
+          messages = messages.map(msg => messageMap.get(msg.id) || msg);
+          logger.success(`✅ Refreshed ${refreshedMessages.length}/${messages.length} batch messages`);
+        } else {
+          // Fallback: Full channel refresh if batch refresh fails
+          logger.warn(`⚠️ Batch refresh failed, attempting full channel refresh...`);
+          const allRefreshedMessages = await this.refreshAllChannelMessages(client, channelId);
+          
+          if (allRefreshedMessages && allRefreshedMessages.length > 0) {
+            const messageMap = new Map(allRefreshedMessages.map(msg => [msg.id, msg]));
+            messages = messages.map(msg => messageMap.get(msg.id) || msg);
+            logger.success(`✅ Fallback: Updated ${messages.length} messages from full refresh`);
+          }
+        }
+      } catch (refreshError) {
+        logger.warn(`⚠️ Message refresh failed: ${refreshError.message}, proceeding with original messages`);
+      }
+
+      // Additional refresh every 3 batches or when high FILE_REFERENCE error rate detected
+      const recentFileRefErrors = this.fileReferenceErrors.filter(
+        timestamp => Date.now() - timestamp < 2 * 60 * 1000 // Last 2 minutes
+      ).length;
+      
+      if (this.batchCounter % 3 === 0 || recentFileRefErrors > 5) {
         logger.info(
-          `🔄 Batch ${this.batchCounter}: Refreshing ALL channel messages to prevent file existence errors...`,
+          `🔄 Extra refresh triggered - Batch ${this.batchCounter} or high error rate (${recentFileRefErrors} recent errors)`,
         );
-        const allRefreshedMessages = await this.refreshAllChannelMessages(
-          client,
-          channelId,
-        );
+        const allRefreshedMessages = await this.refreshAllChannelMessages(client, channelId);
 
         if (allRefreshedMessages && allRefreshedMessages.length > 0) {
-          // Update current batch messages with refreshed data
-          const currentMessageIds = messages.map((m) => m.id);
-          const updatedMessages = allRefreshedMessages.filter((refreshed) =>
-            currentMessageIds.includes(refreshed.id),
-          );
-
-          if (updatedMessages.length > 0) {
-            messages = updatedMessages;
-            logger.info(
-              `✅ Updated ${messages.length} current batch messages with fresh data`,
-            );
-          }
+          const messageMap = new Map(allRefreshedMessages.map(msg => [msg.id, msg]));
+          messages = messages.map(msg => messageMap.get(msg.id) || msg);
+          logger.success(`✅ Extra refresh: Updated ${messages.length} messages`);
         }
       }
 
