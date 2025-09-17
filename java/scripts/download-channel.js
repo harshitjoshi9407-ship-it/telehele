@@ -39,7 +39,7 @@ const CHUNK_SIZE_CONFIG = 32 * 1024 * 1024; // Increased to 32MB for maximum thr
 
 // ULTRA-HIGH-SPEED CONFIGURATIONS
 const BATCH_SIZE = 2; // Increased batch size for better parallel processing
-const CONNECTION_POOL_SIZE = 8; // More connection pools for stability
+const CONNECTION_POOL_SIZE = 32; // More connection pools for stability
 const SPEED_STABILIZATION_DELAY = 20; // Ultra-minimal stabilization delay
 const THROUGHPUT_OPTIMIZATION_MODE = true;
 const AGGRESSIVE_SPEED_MODE = true; // Enabled for maximum speed
