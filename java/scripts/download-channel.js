@@ -31,19 +31,19 @@ const {
 // ULTRA-OPTIMIZED CONFIGURATIONS FOR CONSISTENT 30+ MBPS
 const MAX_PARALLEL_DOWNLOADS_CONFIG = 32; // Dramatically increased for maximum throughput
 const MAX_PARALLEL_UPLOADS_CONFIG = 32; // Dramatically increased for maximum throughput
-const MESSAGE_LIMIT_CONFIG = 200; // Increased batch size for better efficiency
-const RATE_LIMIT_DELAY_CONFIG = 20; // Ultra-minimal delay for maximum speed
-const DOWNLOAD_DELAY_CONFIG = 20; // Ultra-minimal delay for maximum throughput
-const UPLOAD_DELAY_CONFIG = 20; // Ultra-minimal delay for maximum throughput
+const MESSAGE_LIMIT_CONFIG = 500; // Increased batch size for better efficiency
+const RATE_LIMIT_DELAY_CONFIG = 200; // Ultra-minimal delay for maximum speed
+const DOWNLOAD_DELAY_CONFIG = 150; // Ultra-minimal delay for maximum throughput
+const UPLOAD_DELAY_CONFIG = 150; // Ultra-minimal delay for maximum throughput
 const CHUNK_SIZE_CONFIG = 32 * 1024 * 1024; // Increased to 32MB for maximum throughput
 
 // ULTRA-HIGH-SPEED CONFIGURATIONS
-const BATCH_SIZE = 2; // Increased batch size for better parallel processing
-const CONNECTION_POOL_SIZE = 32; // More connection pools for stability
-const SPEED_STABILIZATION_DELAY = 20; // Ultra-minimal stabilization delay
+const BATCH_SIZE = 4; // Increased batch size for better parallel processing
+const CONNECTION_POOL_SIZE = 16; // More connection pools for stability
+const SPEED_STABILIZATION_DELAY = 50; // Ultra-minimal stabilization delay
 const THROUGHPUT_OPTIMIZATION_MODE = true;
 const AGGRESSIVE_SPEED_MODE = true; // Enabled for maximum speed
-const TARGET_SPEED_MBPS = 500; // Increased target to 35 Mbps for headroom
+const TARGET_SPEED_MBPS = 100; // Increased target to 35 Mbps for headroom
 
 /**
  * Ultra-High-Speed Telegram Channel Downloader with Consistent 30+ Mbps Performance
@@ -1478,7 +1478,7 @@ class DownloadChannel {
         timestamp => Date.now() - timestamp < 2 * 60 * 1000 // Last 2 minutes
       ).length;
       
-      if (this.batchCounter % 2 === 0 || recentFileRefErrors > 5) {
+      if (this.batchCounter % 4 === 0 || recentFileRefErrors > 5) {
         logger.info(
           `🔄 Extra refresh triggered - Batch ${this.batchCounter} or high error rate (${recentFileRefErrors} recent errors)`,
         );
